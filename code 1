@@ -1,0 +1,228 @@
+#include <micro_ros_arduino.h> // Micro-ROS-specific header
+#include <std_msgs/msg/float32.h>
+#include <std_msgs/msg/bool.h> // For stop signal
+#include <micro_ros_arduino.h>   // This header file includes relevant Micro-ROS definitions
+#include <rclc/rclc.h>  // Includes the necessary Micro-ROS types, such as rclc_support_t
+#include <rclc/executor.h>
+#include <rosidl_runtime_c/message_type_support_struct.h>
+#include <builtin_interfaces/msg/time.h>
+
+#define PWM_LF 2
+#define DIG_LF 3
+#define PWM_RF 22
+#define DIG_RF 23
+#define PWM_LM 9
+#define DIG_LM 10
+#define PWM_RM 18
+#define DIG_RM 19
+#define PWM_LB 29
+#define DIG_LB 28
+#define PWM_RB 36
+#define DIG_RB 37
+
+// Define constants and reduce precision for memory efficiency
+float w_r = 0.0f, w_l = 0.0f;
+const float wheel_rad = 0.12f, wheel_sep = 0.85f;
+float prev_vel = 0.0f;
+bool stop_motors = false; // Store stop signal
+
+// Node Handle for Micro-ROS
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+rclc_executor_t executor;
+rcl_subscription_t sub_linear, sub_angular, sub_stop;
+
+// Messages for velocity and stop signal
+std_msgs__msg__Float32 linear_msg;
+std_msgs__msg__Float32 angular_msg;
+std_msgs__msg__Bool stop_msg;
+
+// Custom message structure for publishing combined data
+typedef struct {
+    float linear_velocity;
+    float angular_velocity;
+    bool stop_signal;
+    builtin_interfaces__msg__Time timestamp;  // For time of the control
+} custom_control_msg_t;
+
+custom_control_msg_t custom_control_msg;  // Instance of the custom control message
+
+// Function declarations
+
+// Callback function to receive and handle control messages
+void control_cb(const void *msg_in, const char *topic_name) { //maybe can use switch statment too.
+    if (topic_name=="base_linear") {
+        const std_msgs__msg__Float32 *linear_velocity_msg = (const std_msgs__msg__Float32 *)msg_in;
+        custom_control_msg.linear_velocity = linear_velocity_msg->data;
+        Serial.println("Received message type: std_msgs/Float32 (linear velocity)");
+    } 
+    if (topic_name=="base_angular") {
+        const std_msgs__msg__Float32 *angular_velocity_msg = (const std_msgs__msg__Float32 *)msg_in;
+        custom_control_msg.angular_velocity = angular_velocity_msg->data * 2.0f;  // Apply angular velocity factor
+        Serial.println("Received message type: std_msgs/Float32 (angular velocity)");
+    }
+    if (topic_name=="stop_motor") {
+        const std_msgs__msg__Bool *stop_signal_msg = (const std_msgs__msg__Bool *)msg_in;
+        stop_motors = stop_signal_msg->data;
+        Serial.println("Received message type: std_msgs/Bool (stop signal)");
+    }
+
+    // Set timestamp for the control message
+    custom_control_msg.timestamp.sec = rcl_get_error_state().sec;   // Use zero timestamp as placeholder
+    custom_control_msg.timestamp.nanosec = rcl_get_error_state().nanosec;
+
+    // Publish the combined message
+    publish_custom_control_message();
+}
+
+// Function to publish the custom control message
+void publish_custom_control_message() {
+    // Use the custom control message for your task, like logging, etc.
+    Serial.print("Publishing custom control message with linear velocity: ");
+    Serial.print(custom_control_msg.linear_velocity);
+    Serial.print(", angular velocity: ");
+    Serial.print(custom_control_msg.angular_velocity);
+    Serial.print(", stop signal: ");
+    Serial.println(custom_control_msg.stop_signal);
+}
+
+// Deacceleration logic for smoother stops
+void deaccelerate() {
+    while (speed_lin > 0.0f) {
+        speed_lin -= 0.01f;
+        w_r = speed_lin / wheel_rad;
+        w_l = speed_lin / wheel_rad;
+        MotorL(w_l * 30);
+        MotorR(w_r * 30);
+    }
+}
+
+// Motor initialization for Micro-ROS
+void Motors_init() {
+    pinMode(PWM_LF, OUTPUT);
+    pinMode(DIG_LF, OUTPUT);
+    pinMode(PWM_RF, OUTPUT);
+    pinMode(DIG_RF, OUTPUT);
+    pinMode(PWM_LM, OUTPUT);
+    pinMode(DIG_LM, OUTPUT);
+    pinMode(PWM_RM, OUTPUT);
+    pinMode(DIG_RM, OUTPUT);
+    pinMode(PWM_LB, OUTPUT);
+    pinMode(DIG_LB, OUTPUT);
+    pinMode(PWM_RB, OUTPUT);
+    pinMode(DIG_RB, OUTPUT);
+
+    digitalWrite(PWM_LF, LOW);
+    digitalWrite(PWM_LM, LOW);
+    digitalWrite(PWM_LB, LOW);
+    digitalWrite(PWM_RF, LOW);
+    digitalWrite(PWM_RM, LOW);
+    digitalWrite(PWM_RB, LOW);
+}
+
+// Function to control left motor
+void MotorL(int pulse_width) {
+    if (pulse_width > 0) {
+        pulse_width = min(pulse_width, 255);
+        analogWrite(PWM_LF, pulse_width);
+        analogWrite(PWM_LM, pulse_width);
+        analogWrite(PWM_LB, pulse_width);
+        digitalWrite(DIG_LF, HIGH);
+        digitalWrite(DIG_LM, HIGH);
+        digitalWrite(DIG_LB, HIGH);
+    } else if (pulse_width < 0) {
+        pulse_width = min(abs(pulse_width), 255);
+        analogWrite(PWM_LF, pulse_width);
+        analogWrite(PWM_LM, pulse_width);
+        analogWrite(PWM_LB, pulse_width);
+        digitalWrite(DIG_LF, LOW);
+        digitalWrite(DIG_LM, LOW);
+        digitalWrite(DIG_LB, LOW);
+    } else {
+        analogWrite(PWM_LF, 0);
+        analogWrite(PWM_LM, 0);
+        analogWrite(PWM_LB, 0);
+    }
+}
+
+// Function to control right motor
+void MotorR(int pulse_width) {
+    if (pulse_width > 0) {
+        pulse_width = min(pulse_width, 255);
+        analogWrite(PWM_RF, pulse_width);
+        analogWrite(PWM_RM, pulse_width);
+        analogWrite(PWM_RB, pulse_width);
+        digitalWrite(DIG_RF, HIGH);
+        digitalWrite(DIG_RM, HIGH);
+        digitalWrite(DIG_RB, HIGH);
+    } else if (pulse_width < 0) {
+        pulse_width = min(abs(pulse_width), 255);
+        analogWrite(PWM_RF, pulse_width);
+        analogWrite(PWM_RM, pulse_width);
+        analogWrite(PWM_RB, pulse_width);
+        digitalWrite(DIG_RF, LOW);
+        digitalWrite(DIG_RM, LOW);
+        digitalWrite(DIG_RB, LOW);
+    } else {
+        analogWrite(PWM_RF, 0);
+        analogWrite(PWM_RM, 0);
+        analogWrite(PWM_RB, 0);
+    }
+}
+
+// Setup function to initialize Micro-ROS
+void setup() {
+    // Initialize serial communication
+    Serial.begin(115200);
+
+    // Micro-ROS initialization
+    set_microros_transports();
+    allocator = rcl_get_default_allocator();
+    rclc_support_init(&support, 0, NULL, &allocator);
+
+    // Initialize node
+    rclc_node_init_default(&node, "micro_ros_node", "", &support);
+
+    // Initialize subscribers for linear, angular velocity, and stop signal
+    rclc_subscription_init_default(&sub_linear, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "base_linear");
+    rclc_subscription_init_default(&sub_angular, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "base_angular");
+    rclc_subscription_init_default(&sub_stop, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "stop_motor");
+
+    // Initialize executor
+    rclc_executor_init(&executor, &support.context, 3, &allocator);
+    rclc_executor_add_subscription(&executor, &sub_linear, &linear_msg, &control_cb, ON_NEW_DATA);
+    rclc_executor_add_subscription(&executor, &sub_angular, &angular_msg, &control_cb, ON_NEW_DATA);
+    rclc_executor_add_subscription(&executor, &sub_stop, &stop_msg, &control_cb, ON_NEW_DATA);
+
+    // Motor initialization
+    Motors_init();
+}
+
+// Main loop function for processing callbacks and motor control
+void loop() {
+    // Spin executor to handle incoming messages
+    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+
+    // If stop signal received, stop motors
+    if (stop_motors) {
+        MotorL(0);
+        MotorR(0);
+    } else {
+        if (prev_vel - speed_lin >= 0.3f) {
+            deaccelerate();
+        }
+        prev_vel = speed_lin;
+
+        if (abs(speed_ang) > 0.2f || abs(speed_lin) > 0.2f) {
+            w_r = (speed_lin / wheel_rad) + ((speed_ang * wheel_sep) / (2.0f * wheel_rad));
+            w_l = (speed_lin / wheel_rad) - ((speed_ang * wheel_sep) / (2.0f * wheel_rad));
+        } else {
+            w_r = 0.0f;
+            w_l = 0.0f;
+        }
+
+        MotorL(w_l * 30);
+        MotorR(w_r * 30);
+    }
+}
